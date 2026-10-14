@@ -1,0 +1,134 @@
+// >>> pve-hwinfo BEGIN (managed by /usr/local/sbin/pve-hwinfo, do not edit)
+var PveHwInfo = {
+    coresPerRow: 8,
+    lineHeight: 17,
+    rowPadding: 7,
+
+    chipName: function (chip) {
+        let names = {
+            coretemp: 'CPU',
+            k10temp: 'CPU',
+            zenpower: 'CPU',
+            acpitz: 'ACPI',
+            amdgpu: 'iGPU',
+            i915: 'iGPU',
+            xe: 'iGPU',
+        };
+        if (names[chip]) {
+            return names[chip];
+        }
+        if (chip.startsWith('pch_')) {
+            return 'PCH';
+        }
+        if (chip.startsWith('iwlwifi')) {
+            return 'Wi-Fi';
+        }
+        return chip;
+    },
+
+    deg: (v) => `${Math.round(v)}°C`,
+
+    freqLines: function (info) {
+        let f = info && info.cpufreq;
+        let cur = f && Array.isArray(f.cur) ? f.cur : [];
+        let known = cur.filter((v) => v !== null && v !== undefined);
+        if (!known.length) {
+            return [Proxmox.Utils.unknownText];
+        }
+        let avg = Math.round(known.reduce((a, b) => a + b, 0) / known.length);
+        let lines = [`平均 ${avg} MHz（範圍 ${f.min ?? '?'} – ${f.max ?? '?'} MHz）`];
+        for (let i = 0; i < cur.length; i += this.coresPerRow) {
+            lines.push(
+                cur
+                    .slice(i, i + this.coresPerRow)
+                    .map((v, j) => `#${i + j} ${v ?? '-'}`)
+                    .join(' &nbsp;·&nbsp; '),
+            );
+        }
+        return lines;
+    },
+
+    tempLines: function (info) {
+        let temps = info && Array.isArray(info.temps) ? info.temps : [];
+        let groups = new Map();
+        for (const t of temps) {
+            if (!groups.has(t.chip)) {
+                groups.set(t.chip, []);
+            }
+            groups.get(t.chip).push(t);
+        }
+        let lines = [];
+        for (const [chip, list] of groups) {
+            let cores = list.filter((t) => /^Core \d+$/.test(t.label));
+            let parts = list
+                .filter((t) => !cores.includes(t))
+                .map((t) => (/^temp\d+$/.test(t.label) ? '' : `${Ext.htmlEncode(t.label)} `) + this.deg(t.value));
+            if (cores.length) {
+                parts.push(`核心 ${cores.map((t) => Math.round(t.value)).join(' / ')} °C`);
+            }
+            lines.push(`<b>${Ext.htmlEncode(this.chipName(chip))}</b>: ${parts.join(', ')}`);
+        }
+        return lines.length ? lines : [Proxmox.Utils.unknownText];
+    },
+
+    nvmeLines: function (info) {
+        let devs = info && Array.isArray(info.nvme) ? info.nvme : [];
+        if (!devs.length) {
+            return ['無 NVMe 或尚無 SMART 資料'];
+        }
+        let size = (v) => (v === null || v === undefined ? '?' : Proxmox.Utils.format_size(v, true));
+        let lines = [];
+        for (const d of devs) {
+            let problems = [];
+            if (d.smart_passed === false) {
+                problems.push('SMART 未通過');
+            }
+            if (d.critical_warning) {
+                problems.push(`critical warning 0x${d.critical_warning.toString(16)}`);
+            }
+            if (d.media_errors) {
+                problems.push(`media errors ${d.media_errors}`);
+            }
+            let head = [
+                `<b>${Ext.htmlEncode(d.dev)}</b> ${Ext.htmlEncode(d.model ?? '')}`,
+                size(d.capacity),
+                d.temp !== null && d.temp !== undefined ? this.deg(d.temp) : null,
+                d.percentage_used !== null && d.percentage_used !== undefined
+                    ? `已用壽命 ${d.percentage_used}%（備用 ${d.available_spare ?? '?'}%）`
+                    : null,
+            ].filter((v) => v !== null);
+            if (problems.length) {
+                head.push(`<span style="color:red">⚠ ${problems.join(', ')}</span>`);
+            }
+            lines.push(head.join(' | '));
+            lines.push(
+                `讀 ${size(d.data_read)} / 寫 ${size(d.data_written)} | 通電 ${d.power_cycles ?? '?'} 次, ` +
+                    `${d.power_on_hours ?? '?'} 小時 | 異常斷電 ${d.unsafe_shutdowns ?? '?'} 次`,
+            );
+        }
+        return lines;
+    },
+
+    render: function (info, kind) {
+        return this[`${kind}Lines`](info).join('<br>');
+    },
+
+    // the node status panel has a fixed height, grow it to fit the extra rows
+    resize: function (view) {
+        let info = view.getRecordValue('hwinfo');
+        if (!info) {
+            return;
+        }
+        if (view.pveHwInfoBaseHeight === undefined) {
+            view.pveHwInfoBaseHeight = view.getHeight();
+        }
+        let extra = ['freq', 'temp', 'nvme']
+            .map((kind) => this[`${kind}Lines`](info).length * this.lineHeight + this.rowPadding)
+            .reduce((a, b) => a + b, 0);
+        let height = view.pveHwInfoBaseHeight + extra;
+        if (view.getHeight() !== height) {
+            view.setHeight(height);
+        }
+    },
+};
+// <<< pve-hwinfo END

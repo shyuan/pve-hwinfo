@@ -1,0 +1,62 @@
+        # >>> pve-hwinfo BEGIN (managed by /usr/local/sbin/pve-hwinfo, do not edit)
+        $res->{hwinfo} = eval {
+            my $slurp = sub {
+                my ($file) = @_;
+                open(my $fh, '<', $file) or return undef;
+                my $v = do { local $/; <$fh> };
+                close($fh);
+                chomp($v) if defined($v);
+                return $v;
+            };
+            my $int = sub { my $v = $slurp->($_[0]); defined($v) && $v =~ /^-?\d+$/ ? $v + 0 : undef };
+
+            my $cpu_dir = '/sys/devices/system/cpu';
+            my @cpus = sort { $a <=> $b } map { m!/cpu(\d+)$! ? $1 : () } glob("$cpu_dir/cpu[0-9]*");
+            my $khz2mhz = sub { defined($_[0]) ? int($_[0] / 1000) : undef };
+            my $cpufreq = {
+                cur => [map { $khz2mhz->($int->("$cpu_dir/cpu$_/cpufreq/scaling_cur_freq")) } @cpus],
+                min => $khz2mhz->($int->("$cpu_dir/cpu0/cpufreq/cpuinfo_min_freq")),
+                max => $khz2mhz->($int->("$cpu_dir/cpu0/cpufreq/cpuinfo_max_freq")),
+            };
+
+            my @temps;
+            for my $hwmon (glob('/sys/class/hwmon/hwmon*')) {
+                my $chip = $slurp->("$hwmon/name");
+                next if !defined($chip) || $chip eq 'nvme'; # NVMe temps are shown with SMART data
+                for my $input (glob("$hwmon/temp*_input")) {
+                    my ($n) = $input =~ m!/temp(\d+)_input$!;
+                    my $millic = $int->($input);
+                    next if !defined($millic);
+                    push @temps, {
+                        chip => $chip,
+                        label => $slurp->("$hwmon/temp${n}_label") // "temp$n",
+                        n => $n + 0,
+                        value => $millic / 1000,
+                    };
+                }
+            }
+
+            # SMART data is collected by root (pve-hwinfo-nvme.timer), pveproxy runs as www-data
+            my $nvme = [];
+            my $cache = '/run/pve-hwinfo/nvme.json';
+            if (open(my $fh, '<', $cache)) {
+                my $raw = do { local $/; <$fh> };
+                close($fh);
+                my $data = eval { JSON::decode_json($raw) };
+                $nvme = $data if ref($data) eq 'ARRAY';
+            }
+            for my $d (@$nvme) {
+                next if ($d->{dev} // '') !~ /^nvme\d+$/;
+                my ($input) = glob("/sys/class/nvme/$d->{dev}/hwmon*/temp1_input");
+                my $millic = defined($input) ? $int->($input) : undef;
+                $d->{temp} = $millic / 1000 if defined($millic); # live value beats the cached one
+            }
+
+            return {
+                cpufreq => $cpufreq,
+                temps => [sort { $a->{chip} cmp $b->{chip} || $a->{n} <=> $b->{n} } @temps],
+                nvme => $nvme,
+                nvme_updated => (stat($cache))[9],
+            };
+        };
+        # <<< pve-hwinfo END

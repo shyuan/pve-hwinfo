@@ -1,0 +1,8 @@
+[Unit]
+Description=pve-hwinfo: collect NVMe SMART data for the node summary
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/pve-hwinfo/collect-nvme
+Nice=10
+IOSchedulingClass=idle

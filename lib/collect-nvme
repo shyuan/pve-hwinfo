@@ -1,0 +1,49 @@
+#!/usr/bin/perl
+# pve-hwinfo: collect NVMe SMART health into /run/pve-hwinfo/nvme.json.
+# Runs as root from pve-hwinfo-nvme.timer; the node status API (www-data) only reads the cache.
+
+use strict;
+use warnings;
+
+use File::Basename qw(basename);
+use JSON;
+
+my $outdir = '/run/pve-hwinfo';
+my $out = "$outdir/nvme.json";
+
+my @ctrls = sort { ($a =~ /(\d+)$/)[0] <=> ($b =~ /(\d+)$/)[0] }
+    grep { m!^/dev/nvme\d+$! } glob('/dev/nvme*');
+
+my @devs;
+for my $dev (@ctrls) {
+    my $raw = `smartctl -a -j $dev 2>/dev/null`; # non-zero exit bits still come with valid JSON
+    my $j = eval { decode_json($raw) };
+    next if ref($j) ne 'HASH' || !$j->{model_name};
+
+    my $h = $j->{nvme_smart_health_information_log} // {};
+    my $units = sub { defined($_[0]) ? $_[0] * 512 * 1000 : undef }; # NVMe data unit = 1000 x 512 bytes
+
+    push @devs, {
+        dev => basename($dev),
+        model => $j->{model_name},
+        capacity => $j->{nvme_total_capacity} // $j->{user_capacity}->{bytes},
+        smart_passed => $j->{smart_status}->{passed},
+        critical_warning => $h->{critical_warning},
+        temp => $h->{temperature},
+        percentage_used => $h->{percentage_used},
+        available_spare => $h->{available_spare},
+        data_read => $units->($h->{data_units_read}),
+        data_written => $units->($h->{data_units_written}),
+        power_cycles => $h->{power_cycles},
+        power_on_hours => $h->{power_on_hours},
+        unsafe_shutdowns => $h->{unsafe_shutdowns},
+        media_errors => $h->{media_errors},
+    };
+}
+
+mkdir($outdir, 0755) if !-d $outdir;
+open(my $fh, '>', "$out.tmp") or die "$out.tmp: $!\n";
+print $fh encode_json(\@devs);
+close($fh) or die "$out.tmp: $!\n";
+chmod(0644, "$out.tmp");
+rename("$out.tmp", $out) or die "$out: $!\n";

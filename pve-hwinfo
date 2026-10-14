@@ -1,0 +1,123 @@
+#!/bin/bash
+# pve-hwinfo: show per-core CPU frequency, temperatures and NVMe SMART data in the
+# Proxmox VE node summary by patching Nodes.pm and pvemanagerlib.js between markers.
+#
+#   pve-hwinfo apply [--if-needed]   (re)apply the patch, reload pveproxy
+#   pve-hwinfo restore               remove the patch, reload pveproxy
+#   pve-hwinfo status                show whether the patch is applied
+#   pve-hwinfo uninstall             restore and remove all installed files
+#
+# pve-manager upgrades overwrite both files; /etc/apt/apt.conf.d/99pve-hwinfo runs
+# "apply --if-needed" after every dpkg run to put the patch back.
+
+set -euo pipefail
+
+LIB=/usr/local/lib/pve-hwinfo
+NODES_PM=/usr/share/perl5/PVE/API2/Nodes.pm
+MANAGER_JS=/usr/share/pve-manager/js/pvemanagerlib.js
+MARK='>>> pve-hwinfo BEGIN'
+
+log() { echo "pve-hwinfo: $*" >&2; }
+
+is_patched() { grep -qF "$MARK" "$1"; }
+
+# remove every marked block (marker lines included)
+strip() {
+    perl -0pi -e 's{^[^\n]*>>> pve-hwinfo BEGIN.*?<<< pve-hwinfo END[^\n]*\n}{}gms' "$@"
+}
+
+# insert SNIPPET right after the single match of REGEX in FILE
+inject() {
+    perl -e '
+        my ($file, $snippet, $re) = @ARGV;
+        local $/;
+        open(my $fh, "<", $file) or die "$file: $!\n";
+        my $src = <$fh>;
+        close($fh);
+        open($fh, "<", $snippet) or die "$snippet: $!\n";
+        my $add = <$fh>;
+        close($fh);
+        my $count = () = $src =~ /$re/g;
+        die "anchor for $snippet matched $count times in $file (expected 1)\n" if $count != 1;
+        $src =~ s/($re)/$1$add/;
+        open($fh, ">", $file) or die "$file: $!\n";
+        print $fh $src;
+        close($fh) or die "$file: $!\n";
+    ' "$1" "$2" "$3"
+}
+
+reload_pveproxy() {
+    systemctl reload pveproxy
+}
+
+apply() {
+    if [[ "${1:-}" == --if-needed ]] && is_patched "$NODES_PM" && is_patched "$MANAGER_JS"; then
+        return 0
+    fi
+
+    local backup
+    backup=$(mktemp -d /tmp/pve-hwinfo.XXXXXX)
+    cp -a "$NODES_PM" "$MANAGER_JS" "$backup/"
+    rollback() {
+        log "failed, restoring original files"
+        cp -a "$backup/Nodes.pm" "$NODES_PM"
+        cp -a "$backup/pvemanagerlib.js" "$MANAGER_JS"
+        rm -rf "$backup"
+        exit 1
+    }
+    trap rollback ERR
+
+    strip "$NODES_PM" "$MANAGER_JS"
+    inject "$NODES_PM" "$LIB/nodes.pm.snippet" \
+        '\n[ \t]*\$res->\{pveversion\} = PVE::pvecfg::package\(\)[^\n]*\n'
+    inject "$MANAGER_JS" "$LIB/ui-helper.js.snippet" \
+        '\n(?=Ext\.define\('"'"'PVE\.node\.StatusView'"'"', \{\n)'
+    inject "$MANAGER_JS" "$LIB/ui-items.js.snippet" \
+        "(?s:alias: 'widget\\.pveNodeStatus',.*?textField: 'pveversion',\\n[ \\t]*value: '',\\n[ \\t]*\\},\\n)"
+    inject "$MANAGER_JS" "$LIB/ui-resize.js.snippet" \
+        "(?s:alias: 'widget\\.pveNodeStatus',.*?updateTitle: function \\(\\) \\{\\n[ \\t]*var me = this;\\n)"
+
+    if ! perl -c "$NODES_PM" >/dev/null 2>&1; then
+        log "patched Nodes.pm does not compile"
+        rollback
+    fi
+
+    trap - ERR
+    rm -rf "$backup"
+    reload_pveproxy
+    log "applied"
+}
+
+restore() {
+    strip "$NODES_PM" "$MANAGER_JS"
+    reload_pveproxy
+    log "restored"
+}
+
+status() {
+    local f
+    for f in "$NODES_PM" "$MANAGER_JS"; do
+        if is_patched "$f"; then echo "patched     $f"; else echo "not patched $f"; fi
+    done
+    systemctl is-active pve-hwinfo-nvme.timer >/dev/null && echo "timer       active" || echo "timer       inactive"
+    [[ -s /run/pve-hwinfo/nvme.json ]] && echo "nvme cache  $(stat -c '%y' /run/pve-hwinfo/nvme.json)" || echo "nvme cache  missing"
+}
+
+uninstall() {
+    restore
+    systemctl disable --now pve-hwinfo-nvme.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/pve-hwinfo-nvme.service /etc/systemd/system/pve-hwinfo-nvme.timer \
+        /etc/apt/apt.conf.d/99pve-hwinfo
+    systemctl daemon-reload
+    rm -rf "$LIB" /run/pve-hwinfo
+    rm -f "$0"
+    log "uninstalled"
+}
+
+case "${1:-}" in
+    apply) shift; apply "$@" ;;
+    restore) restore ;;
+    status) status ;;
+    uninstall) uninstall ;;
+    *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

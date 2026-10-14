@@ -1,0 +1,2 @@
+// pve-hwinfo: re-apply the node summary patch after pve-manager upgrades overwrite it
+DPkg::Post-Invoke { "if [ -x /usr/local/sbin/pve-hwinfo ]; then /usr/local/sbin/pve-hwinfo apply --if-needed || true; fi"; };

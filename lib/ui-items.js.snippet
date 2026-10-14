@@ -1,0 +1,29 @@
+        // >>> pve-hwinfo BEGIN (managed by /usr/local/sbin/pve-hwinfo, do not edit)
+        {
+            itemId: 'hwinfo-cpufreq',
+            colspan: 2,
+            printBar: false,
+            title: 'CPU 時脈',
+            textField: 'hwinfo',
+            renderer: (info) => PveHwInfo.render(info, 'freq'),
+            value: '',
+        },
+        {
+            itemId: 'hwinfo-temps',
+            colspan: 2,
+            printBar: false,
+            title: '溫度',
+            textField: 'hwinfo',
+            renderer: (info) => PveHwInfo.render(info, 'temp'),
+            value: '',
+        },
+        {
+            itemId: 'hwinfo-nvme',
+            colspan: 2,
+            printBar: false,
+            title: 'NVMe SMART',
+            textField: 'hwinfo',
+            renderer: (info) => PveHwInfo.render(info, 'nvme'),
+            value: '',
+        },
+        // <<< pve-hwinfo END
